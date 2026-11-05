@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  [PATCH-ROOT] Strings for the android-root-cli privileged-backend card.
+
+  Merge these <string> entries into:
+      src/android/app/src/main/res/values/strings.xml
+
+  They go in ONE file on purpose. Upstream splits strings across ~40
+  per-feature files (strings_chat_search.xml, strings_envvar_state.xml, …),
+  and a patcher cannot guess which one is "right" — putting them all in the
+  master values/strings.xml is the one location every Android build already
+  merges, and it keeps the whole patch auditable as a single diff.
+
+  Translations: only zh-Hans and zh-Hant are provided below because those are
+  the two the patched device runs. The app falls back to values/strings.xml for
+  every other locale, which renders English rather than a blank row — the same
+  behaviour upstream has for any string it has not translated yet.
+
+  Naming: `perm_root_*` mirrors upstream's `perm_shizuku_*` family. The
+  `perm_section_*` key continues the existing section-header convention.
+-->
+<resources>
+
+    <!-- Section header. Sits directly under the existing
+         "特权后端 / Privileged backend" (perm_section_privileged_backend)
+         card, so the reader sees two backends side by side and understands
+         they are alternatives, not layers. -->
+    <string name="perm_section_root_backend">Root 直连后端</string>
+
+    <!-- Body row. -->
+    <string name="perm_root_cli_title">android-root-cli</string>
+    <string name="perm_root_cli_description">通过设备自身的 su（Magisk / KernelSU / APatch）以 uid 0 执行命令，不经过 Shizuku</string>
+
+    <!-- System-authorisation status row. -->
+    <string name="perm_root_system_title">系统授权</string>
+    <string name="perm_root_state_no_su">未检测到 su —— 本机未 root，或 root 管理器未向应用开放 su</string>
+    <string name="perm_root_state_pending">已找到 su，但 Minis 尚未获得授权</string>
+    <string name="perm_root_state_ready">就绪 · %1$s</string>
+    <string name="perm_root_badge_unavailable">不可用</string>
+    <string name="perm_root_badge_pending">待授权</string>
+    <string name="perm_root_badge_ready">已就绪</string>
+
+    <!-- Grant action. Tapping it is what raises the manager's dialog. -->
+    <string name="perm_root_action_grant">请求 root 授权</string>
+    <string name="perm_root_action_grant_sub">触发一次 su 调用，在 root 管理器的弹窗里选择允许</string>
+    <string name="perm_root_action_grant_waiting">等待授权结果…</string>
+
+    <!-- Post-grant verification. -->
+    <string name="perm_root_action_verify">验证 root 通路</string>
+    <string name="perm_root_action_verify_sub">执行 su -c id，确认返回 uid=0</string>
+    <string name="perm_root_verify_title">su -c id 输出</string>
+
+    <!-- Transient. -->
+    <string name="perm_root_probing">检测中…</string>
+
+    <!-- Section footers. The unrooted variant says what to install instead of
+         pretending the feature is merely switched off. -->
+    <string name="perm_root_footer">android-root-cli 直接调用设备上的 su，不依赖 Shizuku / Sui。授权由 root 管理器（Magisk / KernelSU / APatch）负责，本页只读取状态。下方权限控制 Agent 是否可以调用它。</string>
+    <string name="perm_root_footer_no_su">本机没有可用的 su。安装 Magisk、KernelSU 或 APatch 后回到本页即可自动检测，无需重启 Minis。</string>
+
+</resources>
