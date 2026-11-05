@@ -49,9 +49,17 @@
     <string name="perm_root_action_verify">验证 root 通路</string>
     <string name="perm_root_action_verify_sub">执行 su -c id，确认返回 uid=0</string>
     <string name="perm_root_verify_title">su -c id 输出</string>
-
     <!-- Transient. -->
     <string name="perm_root_probing">检测中…</string>
+
+    <!-- Agent-side gate row. -->
+    <string name="perm_root_agent_permission_sub">Agent 是否可以调用</string>
+
+    <!-- Verify dialog dismiss. Local copy rather than a shared key: upstream has
+         no common "OK" — its dialogs each name their own action, so borrowing one
+         would couple this patch to a string that could be renamed per-screen. -->
+    <string name="perm_root_ok">知道了</string>
+
 
     <!-- Section footers. The unrooted variant says what to install instead of
          pretending the feature is merely switched off. -->
