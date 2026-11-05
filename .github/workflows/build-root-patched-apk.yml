@@ -2,13 +2,31 @@ name: Build root-patched APK
 
 # [PATCH-ROOT] Builds a debug APK of OpenMinis with the android-root-cli
 # backend added. Manual dispatch only: this fork exists solely to produce that
-# artefact, and a push trigger would rebuild ~60 MB of native dependencies on
-# every documentation edit.
+# artefact, and a push trigger would rebuild the native stack on every
+# documentation edit.
+#
+# ── What the Android build actually needs ────────────────────────────────────
+# BUILDING.md's Android section and this workflow list the SAME three native
+# prerequisites, and that is not a coincidence — anything else is iOS-only:
+#
+#   PRoot          required. scripts/prepare_android_sandbox.sh refuses to run
+#                  without assets/proot-aarch64, and without it every execve
+#                  inside the sandbox fails at runtime.
+#   Alpine rootfs  required, downloaded by that same script.
+#   rclone aar     required by build.gradle.kts (`implementation(group = "",
+#                  name = "rclone", ext = "aar")`).
+#
+#   FFmpeg, LAME   NOT used on Android. build_lame.sh and build_ffmpeg.sh are
+#                  macOS/Xcode scripts (`xcrun`, `-miphoneos-version-min`,
+#                  `--host=aarch64-apple-darwin`), src/android/app/src/main/cpp
+#                  builds only pty_bridge / crash_handler / jieba_jni, and
+#                  nothing in the Gradle files references either library.
+#                  Running them on a Linux runner fails instantly on `xcrun`.
 on:
   workflow_dispatch:
     inputs:
       skip_native:
-        description: "Skip FFmpeg + rclone (faster, but media and cloud-sync tools will be missing)"
+        description: "Skip rclone — build is much faster, but backup destinations (SMB/WebDAV/SFTP/S3/FTP) and the network panel will not work"
         type: boolean
         default: false
 
@@ -17,31 +35,28 @@ env:
   NODE_VERSION: "20"
   JAVA_VERSION: "21"
   NDK_VERSION: "28.0.12433566"
+  # Pinned: Google rotates `_latest` and an unpinned zip can change its internal
+  # directory layout (the `cmdline-tools/` wrapper) without notice.
   CMDLINE_TOOLS: "13114758"
 
 jobs:
   build:
     runs-on: ubuntu-24.04
-    timeout-minutes: 180
+    timeout-minutes: 120
 
     steps:
       - name: Checkout (with submodules)
         uses: actions/checkout@v4
         with:
-          # deps/ish and deps/proot are submodules; build_proot.sh compiles
-          # straight out of deps/proot and fails without it.
+          # deps/proot is a submodule and build_proot.sh compiles straight out
+          # of it. deps/ish is iOS-only but harmless to fetch.
           submodules: recursive
           fetch-depth: 1
 
       - name: Free disk space
-        # The runner ships ~14 GB free and this build wants far more: NDK ~4 GB,
-        # SDK ~2 GB, an FFmpeg tree ~5 GB, plus Gradle caches. Dropping the
-        # preinstalled SDK and the toolchains we do not use frees roughly 25 GB.
-        #
-        # The Android SDK is removed HERE and reinstalled cleanly below: the
-        # runner image's copy carries a cmdline-tools build whose bundled
-        # `sdkmanager` is too old for current package lists, which is what made
-        # the previous attempt fail with "Failed to find package 'tools'".
+        # The runner ships ~14 GB free; NDK alone is ~4 GB. The preinstalled
+        # Android SDK is removed here and reinstalled cleanly below, because the
+        # image's cmdline-tools build is too old for current package lists.
         run: |
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android \
                       /opt/ghc /usr/local/share/boost || true
@@ -66,13 +81,11 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
 
       - name: Install Android SDK command-line tools
-        # Deliberately NOT android-actions/setup-android. That action runs
-        # `sdkmanager tools` unconditionally, and the `tools` package was
-        # removed from the repository — it now fails with "Failed to find
-        # package 'tools'" before anything of ours gets a chance to run.
-        #
-        # Installing the official command-line tools zip by hand is a few lines
-        # and removes that dependency entirely.
+        # NOT android-actions/setup-android. That action runs `sdkmanager tools`
+        # unconditionally, and the `tools` package was removed from the
+        # repository — it dies with "Failed to find package 'tools'" before any
+        # of our steps run. Installing the official zip is a few lines and
+        # removes the dependency.
         run: |
           set -euo pipefail
           SDK_ROOT="$HOME/android-sdk"
@@ -82,48 +95,45 @@ jobs:
             "https://dl.google.com/android/repository/commandlinetools-linux-${CMDLINE_TOOLS}_latest.zip"
           unzip -q cmdtools.zip -d "$SDK_ROOT/cmdline-tools"
           mv "$SDK_ROOT/cmdline-tools/cmdline-tools" "$SDK_ROOT/cmdline-tools/latest"
-          echo "ANDROID_HOME=$SDK_ROOT" >> "$GITHUB_ENV"
-          echo "ANDROID_SDK_ROOT=$SDK_ROOT" >> "$GITHUB_ENV"
+          {
+            echo "ANDROID_HOME=$SDK_ROOT"
+            echo "ANDROID_SDK_ROOT=$SDK_ROOT"
+            echo "ANDROID_NDK_HOME=$SDK_ROOT/ndk/${NDK_VERSION}"
+            echo "ANDROID_NDK_ROOT=$SDK_ROOT/ndk/${NDK_VERSION}"
+          } >> "$GITHUB_ENV"
           echo "$SDK_ROOT/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
           echo "$SDK_ROOT/platform-tools" >> "$GITHUB_PATH"
           "$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" --version
 
-      - name: Install NDK + platform
-        # --licenses first: sdkmanager refuses to install without accepted
-        # licences. It is fed `yes` and its exit status is NOT trusted, because
-        # it returns non-zero on the empty trailing read even when every licence
-        # was accepted — the install below is the real check.
+      - name: Install NDK + platform + build-tools
+        # --licenses is fed `yes` and its exit status is deliberately ignored: it
+        # returns non-zero on the empty trailing read even when every licence was
+        # accepted. The install below is the real check.
         run: |
           set -euo pipefail
           SDKMAN="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
           yes | "$SDKMAN" --licenses > /dev/null 2>&1 || true
-          "$SDKMAN" --install "ndk;${NDK_VERSION}" "platforms;android-36" "build-tools;36.0.0"
-          echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
-          echo "ANDROID_NDK_ROOT=$ANDROID_SDK_ROOT/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
+          "$SDKMAN" --install \
+            "ndk;${NDK_VERSION}" \
+            "platforms;android-36" \
+            "build-tools;36.0.0" \
+            "platform-tools"
           ls "$ANDROID_SDK_ROOT/ndk/"
 
       - name: Build PRoot (native sandbox runtime)
         # Produces assets/proot-aarch64 + jniLibs/arm64-v8a/libproot*.so.
-        # Without these the sandbox boots but every execve fails — see the long
-        # comment at the top of the script. NOT skippable: the app is useless
-        # without it.
+        # NOT skippable — the comment at the top of this file explains why.
         run: |
           chmod +x deps/build_proot.sh
           ./deps/build_proot.sh
 
-      - name: Build FFmpeg + LAME
-        if: ${{ !inputs.skip_native }}
-        # LAME first: FFmpeg links against it. BUILDING.md is explicit that the
-        # order matters.
-        run: |
-          chmod +x deps/build_lame.sh deps/build_ffmpeg.sh
-          ./deps/build_lame.sh
-          ./deps/build_ffmpeg.sh
-
       - name: Build rclone aar (gomobile)
         if: ${{ !inputs.skip_native }}
-        # rclone carries the embedded Tailscale node and the local-network
-        # entry point, so dropping it loses cloud sync AND the network panel.
+        # build.gradle.kts declares a file dependency on app/libs/rclone.aar, so
+        # a build with this skipped fails at dependency resolution unless the
+        # declaration is also removed. The comment on the Gradle line points
+        # here, so that is the intended escape hatch — but it means skip_native
+        # is a "I know what I am doing" switch, not a convenience toggle.
         run: |
           go install golang.org/x/mobile/cmd/gomobile@latest
           export PATH="$(go env GOPATH)/bin:$PATH"
@@ -133,15 +143,14 @@ jobs:
           mkdir -p src/android/app/libs
           cp deps/build/rclone/rclone.aar src/android/app/libs/
 
-      - name: Prepare Android sandbox rootfs
+      - name: Prepare Android sandbox (Alpine rootfs + PRoot check)
         run: |
           chmod +x scripts/prepare_android_sandbox.sh
           ./scripts/prepare_android_sandbox.sh
 
       - name: Apply the root-backend patch
-        # Performs the EDITS (as opposed to file additions) that the Contents
-        # API cannot express: MinisApp.kt registration, the settings-screen
-        # card, and the OffloadPermissionManager registry entry.
+        # The in-place EDITS that a file-upload cannot express: MinisApp.kt
+        # registration, the settings-screen card, and the permission registry.
         run: python3 patch/apply_patch.py
 
       - name: Verify the patch landed
@@ -150,9 +159,8 @@ jobs:
       - name: Gradle build
         working-directory: src/android
         env:
-          # The runner has 16 GB. Gradle's default 1.5 GB heap is far too small
-          # for this project; the Kotlin daemon OOMs on the bigger Compose
-          # modules without this.
+          # Gradle's default 1.5 GB heap is far too small for this project; the
+          # Kotlin daemon OOMs on the bigger Compose modules.
           GRADLE_OPTS: "-Xmx6g -XX:MaxMetaspaceSize=1g"
         run: |
           chmod +x gradlew
