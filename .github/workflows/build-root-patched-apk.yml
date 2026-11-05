@@ -1,0 +1,159 @@
+name: Build root-patched APK
+
+# [PATCH-ROOT] Builds a debug APK of OpenMinis with the android-root-cli
+# backend added. Manual dispatch only: this fork exists solely to produce that
+# artefact, and a push trigger would rebuild 60 MB of native dependencies on
+# every documentation edit.
+on:
+  workflow_dispatch:
+    inputs:
+      skip_native:
+        description: "Skip FFmpeg + rclone (faster, but media and cloud-sync tools will be missing)"
+        type: boolean
+        default: false
+
+env:
+  GO_VERSION: "1.25.1"
+  NODE_VERSION: "20"
+  JAVA_VERSION: "21"
+  NDK_VERSION: "28.0.12433566"
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+
+    steps:
+      - name: Checkout (with submodules)
+        uses: actions/checkout@v4
+        with:
+          # deps/ish and deps/proot are submodules; build_proot.sh compiles
+          # straight out of deps/proot and fails without it.
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Free disk space
+        # The runner ships ~14 GB free and this build wants far more: NDK ~4 GB,
+        # SDK ~2 GB, an FFmpeg tree ~5 GB, plus Gradle caches. Dropping the
+        # toolchains we do not use frees roughly 25 GB.
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android/sdk/ndk \
+                      /opt/ghc /usr/local/share/boost || true
+          sudo apt-get clean
+          df -h /
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: false
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Install Android SDK components
+        uses: android-actions/setup-android@v3
+
+      - name: Install NDK r28
+        run: |
+          yes | sdkmanager --install "ndk;${NDK_VERSION}" > /dev/null
+          echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_ROOT=$ANDROID_SDK_ROOT/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
+
+      - name: Accept Android SDK licences
+        run: yes | sdkmanager --licenses > /dev/null
+
+      - name: Build PRoot (native sandbox runtime)
+        # Produces assets/proot-aarch64 + jniLibs/arm64-v8a/libproot*.so.
+        # Without these the sandbox boots but every execve fails — see the long
+        # comment at the top of the script. NOT skippable: the whole app is
+        # useless without it.
+        run: |
+          chmod +x deps/build_proot.sh
+          ./deps/build_proot.sh
+
+      - name: Build FFmpeg + LAME
+        if: ${{ !inputs.skip_native }}
+        # LAME first: FFmpeg links against it. BUILDING.md is explicit that the
+        # order matters.
+        run: |
+          chmod +x deps/build_lame.sh deps/build_ffmpeg.sh
+          ./deps/build_lame.sh
+          ./deps/build_ffmpeg.sh
+
+      - name: Build rclone aar (gomobile)
+        if: ${{ !inputs.skip_native }}
+        # rclone carries the embedded Tailscale node and the local-network
+        # entry point, so dropping it loses cloud sync AND the network panel.
+        run: |
+          go install golang.org/x/mobile/cmd/gomobile@latest
+          export PATH="$(go env GOPATH)/bin:$PATH"
+          gomobile init
+          chmod +x deps/build_rclone_android.sh
+          ./deps/build_rclone_android.sh
+          mkdir -p src/android/app/libs
+          cp deps/build/rclone/rclone.aar src/android/app/libs/
+
+      - name: Prepare Android sandbox rootfs
+        run: |
+          chmod +x scripts/prepare_android_sandbox.sh
+          ./scripts/prepare_android_sandbox.sh
+
+      - name: Apply the root-backend patch
+        # Performs the EDITS (as opposed to file additions) that the Contents
+        # API cannot express: MinisApp.kt registration, the settings-screen
+        # card, and the OffloadPermissionManager registry entry.
+        run: python3 patch/apply_patch.py
+
+      - name: Verify the patch landed
+        run: python3 patch/verify_patch.py
+
+      - name: Gradle build
+        working-directory: src/android
+        env:
+          # The runner has 16 GB. Gradle's default 1.5 GB heap is far too small
+          # for this project; the Kotlin daemon OOMs on the bigger Compose
+          # modules without this.
+          GRADLE_OPTS: "-Xmx6g -XX:MaxMetaspaceSize=1g"
+        run: |
+          chmod +x gradlew
+          ./gradlew :app:assembleDebug \
+            --no-daemon \
+            --stacktrace \
+            -Dorg.gradle.jvmargs="-Xmx6g -XX:MaxMetaspaceSize=1g"
+
+      - name: Collect artefacts
+        if: always()
+        run: |
+          mkdir -p out
+          find src/android/app/build/outputs -name '*.apk' -exec cp {} out/ \; || true
+          ls -la out/ || true
+
+      - name: Upload APK
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: openminis-root-patched-debug
+          path: out/*.apk
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload build logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs
+          path: |
+            src/android/app/build/reports/**
+            src/android/build/reports/**
+            **/build/*.log
+          if-no-files-found: warn
+          retention-days: 7
